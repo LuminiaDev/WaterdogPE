@@ -58,4 +58,9 @@ public class NetworkSettings extends YamlConfig {
     @Accessors(fluent = true)
     @Comment("Enable RakNet cookies for additional security. Do NOT disable this unless you know what you are doing.")
     private boolean enableCookies = true;
+
+    @Path("enable_encoding_limit")
+    @Accessors(fluent = true)
+    @Comment("Enable encoding limit for servers")
+    private boolean enableEncodingLimit = true;
 }

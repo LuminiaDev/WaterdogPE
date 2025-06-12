@@ -15,7 +15,9 @@
 
 package dev.waterdog.waterdogpe.network.connection.codec.packet;
 
+import dev.waterdog.waterdogpe.ProxyServer;
 import dev.waterdog.waterdogpe.network.NetworkMetrics;
+import dev.waterdog.waterdogpe.utils.config.proxy.NetworkSettings;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.MessageToMessageCodec;
@@ -152,9 +154,12 @@ public abstract class BedrockPacketCodec extends MessageToMessageCodec<BedrockBa
         this.codec = requireNonNull(codec, "Codec cannot be null");
         this.helper = requireNonNull(helper, "Helper can not be null");
 
+        NetworkSettings networkSettings = ProxyServer.getInstance().getNetworkSettings();
         switch (this.inboundRecipient) {
             case CLIENT -> this.helper.setEncodingSettings(EncodingSettings.UNLIMITED); // we trust downstream
-            case SERVER -> this.helper.setEncodingSettings(EncodingSettings.SERVER);
+            case SERVER -> this.helper.setEncodingSettings(networkSettings.enableEncodingLimit() ?
+                    EncodingSettings.SERVER :
+                    EncodingSettings.UNLIMITED);
         }
         return this;
     }
