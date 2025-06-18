@@ -15,12 +15,15 @@
 
 package dev.waterdog.waterdogpe.network.protocol.user;
 
+import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import com.nimbusds.jose.*;
+import com.nimbusds.jose.JOSEException;
+import com.nimbusds.jose.JWSAlgorithm;
+import com.nimbusds.jose.JWSHeader;
+import com.nimbusds.jose.JWSObject;
 import com.nimbusds.jose.crypto.ECDSASigner;
-import com.nimbusds.jose.crypto.ECDSAVerifier;
 import com.nimbusds.jose.jwk.Curve;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
@@ -30,21 +33,19 @@ import dev.waterdog.waterdogpe.utils.config.proxy.ProxyConfig;
 import org.cloudburstmc.protocol.bedrock.BedrockSession;
 import org.cloudburstmc.protocol.bedrock.packet.LoginPacket;
 import org.cloudburstmc.protocol.bedrock.packet.ServerToClientHandshakePacket;
+import org.cloudburstmc.protocol.bedrock.util.ChainValidationResult;
 import org.cloudburstmc.protocol.bedrock.util.EncryptionUtils;
-import org.cloudburstmc.protocol.common.util.Preconditions;
 
 import javax.crypto.SecretKey;
 import java.net.InetSocketAddress;
 import java.net.URI;
-import java.security.*;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.PublicKey;
 import java.security.interfaces.ECPrivateKey;
 import java.security.interfaces.ECPublicKey;
-import java.security.spec.InvalidKeySpecException;
-import java.security.spec.X509EncodedKeySpec;
 import java.text.ParseException;
 import java.util.Base64;
-import java.util.Iterator;
-import java.util.List;
 import java.util.UUID;
 
 /**
@@ -52,73 +53,18 @@ import java.util.UUID;
  */
 public class HandshakeUtils {
 
-    private static final ECPublicKey MOJANG_PUBLIC_KEY_OLD;
-    private static final ECPublicKey MOJANG_PUBLIC_KEY;
-
     private static final KeyPair privateKeyPair;
+
+    private static final Gson GSON = new Gson();
 
     static {
         try {
             KeyPairGenerator generator = KeyPairGenerator.getInstance("EC");
             generator.initialize(Curve.P_384.toECParameterSpec());
             privateKeyPair = generator.generateKeyPair();
-
-            MOJANG_PUBLIC_KEY_OLD = generateKey("MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAE8ELkixyLcwlZryUQcu1TvPOmI2B7vX83ndnWRUaXm74wFfa5f/lwQNTfrLVHa2PmenpGI6JhIMUJaWZrjmMj90NoKNFSNBuKdm8rYiXsfaz3K36x/1U26HpG0ZxK/V1V");
-            MOJANG_PUBLIC_KEY = generateKey("MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAECRXueJeTDqNRRgJi/vlRufByu/2G0i2Ebt6YMar5QX/R0DIIyrJMcUpruK4QveTfJSTp3Shlq4Gk34cD/4GUWwkv0DVuzeuB+tXija7HBxii03NHDbPAD0AKnLr2wdAp");
         } catch (Exception e) {
             throw new RuntimeException("Unable to generate private keyPair!", e);
         }
-    }
-
-    public static KeyPair getPrivateKeyPair() {
-        return privateKeyPair;
-    }
-
-    public static boolean validateChain(List<String> chainArray, boolean strict) throws Exception {
-        if (strict && chainArray.size() > 3) {
-            // We dont expect larger chain
-            return false;
-        }
-
-        ECPublicKey lastKey = null;
-        boolean authed = false;
-        Iterator<String> iterator = chainArray.iterator();
-        while(iterator.hasNext()){
-            SignedJWT jwt = SignedJWT.parse(iterator.next());
-
-            URI x5u = jwt.getHeader().getX509CertURL();
-            if (x5u == null) {
-                throw new JOSEException("Key not found");
-            }
-
-            ECPublicKey expectedKey = generateKey(jwt.getHeader().getX509CertURL().toString());
-            if (lastKey == null) {
-                // First key is self signed
-                lastKey = expectedKey;
-            } else if (strict && !lastKey.equals(expectedKey)) {
-                // Make sure the previous key matches the header of the current
-                throw new IllegalArgumentException("Key does not match");
-            }
-
-            if (!verifyJwt(jwt, lastKey)) {
-                if (strict) {
-                    throw new JOSEException("Login JWT was not valid");
-                }
-                return false;
-            }
-
-            if (MOJANG_PUBLIC_KEY.equals(lastKey) || MOJANG_PUBLIC_KEY_OLD.equals(lastKey)) {
-                authed = true;
-            } else if (authed) {
-                return !iterator.hasNext();
-            }
-
-            JsonObject payload = (JsonObject) JsonParser.parseString(jwt.getPayload().toString());
-            Preconditions.checkArgument(payload.has("identityPublicKey"), "IdentityPublicKey node is missing in chain!");
-            JsonElement ipkNode = payload.get("identityPublicKey");
-            lastKey = generateKey(ipkNode.getAsString());
-        }
-        return authed;
     }
 
     public static SignedJWT createExtraData(KeyPair pair, JsonObject extraData) {
@@ -150,39 +96,20 @@ public class HandshakeUtils {
         }
     }
 
-    public static ECPublicKey generateKey(String b64) throws NoSuchAlgorithmException, InvalidKeySpecException {
-        return (ECPublicKey) KeyFactory.getInstance("EC").generatePublic(new X509EncodedKeySpec(Base64.getDecoder().decode(b64)));
-    }
-
     public static void signJwt(JWSObject jws, ECPrivateKey key) throws JOSEException {
         jws.sign(new ECDSASigner(key, Curve.P_384));
     }
 
-    public static boolean verifyJwt(JWSObject jws, ECPublicKey key) throws JOSEException {
-        return jws.verify(new ECDSAVerifier(key));
-    }
-
     public static HandshakeEntry processHandshake(BedrockSession session, LoginPacket packet, ProtocolVersion protocol, boolean strict) throws Exception {
-        List<String> chain = packet.getChain();
-        if (chain.size() < 1) {
-            throw new IllegalArgumentException("Invalid chain data");
-        }
+        ChainValidationResult result = EncryptionUtils.validatePayload(packet.getAuthPayload());
 
-        boolean xboxAuth = HandshakeUtils.validateChain(chain, strict);
-        JsonObject payload = (JsonObject) JsonParser.parseString(SignedJWT.parse(chain.get(chain.size() - 1)).getPayload().toString());
-        JsonObject extraData = HandshakeUtils.parseExtraData(packet, payload);
-
-        if (!payload.has("identityPublicKey")) {
-            throw new RuntimeException("Identity Public Key was not found!");
-        }
-        String identityPublicKeyString = payload.get("identityPublicKey").getAsString();
-
-        ECPublicKey identityPublicKey = generateKey(identityPublicKeyString);
-        SignedJWT extraDataJwt = SignedJWT.parse(packet.getExtra());
-        if (!verifyJwt(extraDataJwt, identityPublicKey) && strict) {
-            xboxAuth = false;
-        }
+        boolean xboxAuth = result.signed();
+        JsonObject payload = GSON.toJsonTree(result.rawIdentityClaims()).getAsJsonObject();
+        JsonObject extraData = HandshakeUtils.parseExtraData(payload);
+        SignedJWT extraDataJwt = SignedJWT.parse(packet.getClientJwt());
         JsonObject clientData = HandshakeUtils.parseClientData(extraDataJwt, extraData, session);
+
+        ECPublicKey identityPublicKey = EncryptionUtils.parseKey(result.identityClaims().identityPublicKey);
         return new HandshakeEntry(identityPublicKey, clientData, extraData, xboxAuth, protocol);
     }
 
@@ -197,7 +124,7 @@ public class HandshakeUtils {
         return clientData;
     }
 
-    public static JsonObject parseExtraData(LoginPacket packet, JsonObject payload) {
+    public static JsonObject parseExtraData(JsonObject payload) {
         JsonElement extraDataElement = payload.get("extraData");
         if (!extraDataElement.isJsonObject()) {
             throw new IllegalStateException("Invalid 'extraData'");
